@@ -1,56 +1,111 @@
-import Ccxt from 'ccxt'
-import Kucoin from 'kucoin-sdk'
+import ccxt from 'ccxt'
 import fs from 'fs'
-import { KucoinSDK } from 'kucoin-sdk/types'
 
-const config = fs.read
-new Ccxt.kucoin({ apiKey, secret, password })
+const config = JSON.parse(fs.readFileSync('config.json').toString())
+console.log(config.default)
+let kucoin = new ccxt.kucoin(config[config.default])
+if (config.default === 'sandbox') kucoin.urls.api = kucoin.urls.test
+kucoin.enableRateLimit = true
+kucoin.timeout = 30000
  
-const header = 'Type,Date,InOrBuyCurrency,OutOrSellCurrency,InOrBuyAmount,OutOrSellAmount,FeeAmount,FeeCurrency'
 const file = fs.createWriteStream('KucoinExport.csv')
-file.write(header + '\n')
+file.write('Type,Date,InOrBuyAmount,InOrBuyCurrency,OutOrSellAmount,OutOrSellCurrency,FeeAmount,FeeCurrency\n')
 
-let KucoinInstance = new Kucoin()
+const fetchLedger = async () => {
+  const accounts = await kucoin.fetchAccounts()
+  const currencies = 
+    accounts
+      .filter((account: any) => account.type === 'trade')
+      .map((account: any) => account.currency)
 
-/*
-let KucoinInstance = new Kucoin()
-*/
-const daysAgo = new Date().setDate(new Date().getDate() - 7)
-// change this to a loop until account opened date (need to find out how to get account opening date)
+  const fetchLedgers = async (total: any, currency: string) => {
+    const ledger = await kucoin.fetchLedger(currency, undefined, 500)
+    return [ ...await total, ...ledger ]
+  }
 
-const response = KucoinInstance.listFills(
-  { tradeType: 'TRADE' }, //endAt: daysAgo.toString() }
-)
+  return await currencies.reduce(fetchLedgers, [])
+}
+
+const earliestTransaction = (ledger: any) => {
+  const dates = ledger.map((l: any) => l.timestamp)
+  return Math.min(...dates)
+}
 
 const currencies = (item: any, side: string) => {
-  const currencies = item.symbol.split('-')
+  const currencies = item.symbol.split('/')
   return item.side === side ? currencies[0] : currencies[1]
 }
 
 const buyCurrency = (item: any) => currencies(item, 'buy')
 const sellCurrency = (item: any) => currencies(item, 'sell')
-const buyAmount = (item: any) => item.side === 'buy' ? item.funds : 0
-const sellAmount = (item: any) => item.side === 'sell' ? item.funds : 0
+const buyAmount = (item: any) => item.side === 'buy' ? item.amount : item.cost
+const sellAmount = (item: any) => item.side === 'sell' ? item.amount : item.cost
 
-const writeLine = (item: any) => {
+const writeTradeLine = (item: any) => {
+  console.log(item)
+
+  const datetime = kucoin.iso8601(item.timestamp)
   const line = [
-    'TRADE',
-    new Date(item.createdAt).toISOString(),
-    buyCurrency(item),
-    sellCurrency(item),
+    'Trade',
+    datetime,
     buyAmount(item),
+    buyCurrency(item),
     sellAmount(item),
-    item.fee,
-    item.feeCurrency
+    sellCurrency(item),
+    item.fee.cost,
+    item.fee.currency
   ].join(',') + '\n'
+
   file.write(line)
 }
 
-const handleResponse = (response: KucoinSDK.Http.Data<any>) => {
-  response.data.items.forEach(writeLine)
+const writeLedgerLine = (item: any) => {
+  console.log(item)
+
+  const line = [
+    item.info.bizType,
+    item.datetime,
+    item.direction === 'in' ? (item.amount - item.fee.cost) : '',
+    item.direction === 'in' ? item.currency : '',
+    item.direction === 'out' ? (item.amount - item.fee.cost) : '',
+    item.direction === 'out' ? item.currency : '',
+    item.fee.cost,
+    item.fee.code
+  ].join(',') + '\n'
+    
+  file.write(line)
 }
 
-response.then(handleResponse)
-  .catch( err => console.log("Error:", err) )
-  .finally( () => file.end() )
+const ONE_DAY = 24 * 60 * 60 * 1000 // To ensure timezones don't truncate data
+const ONE_WEEK = 7 * ONE_DAY
+
+;(async () => {
+  const ledger = await fetchLedger()
+  const startTimestamp = earliestTransaction(ledger) - ONE_DAY
+
+  ledger.forEach(writeLedgerLine)
+
+  let timestamp = startTimestamp
+  let params = { currentPage: 1 }
+  while(timestamp < kucoin.milliseconds()) {
+    const trades = await kucoin.fetchMyTrades(undefined, timestamp, 500, params)
+    if (trades.length > 0) {
+      console.log(`${trades.length} entries for ${kucoin.iso8601(timestamp)}`)
+      trades.forEach(writeTradeLine)
+
+      if (trades.length === 500) {
+        params = { currentPage: params.currentPage + 1 }
+      } else {
+        timestamp += ONE_WEEK
+        params = { currentPage: 1 }
+      }
+    } else {
+      console.log(`No entries for ${kucoin.iso8601(timestamp)}`)
+      timestamp += ONE_WEEK
+      params = { currentPage: 1 }
+    }
+  }
+
+  file.end() 
+})()
 

@@ -1,0 +1,14 @@
+{
+  "sandbox": {
+    "apiKey": "",
+    "secret": "",
+    "password": ""
+  },
+  "production": {
+    "apiKey": "",
+    "secret": "",
+    "password": ""
+  },
+  "default": "production"
+}
+
